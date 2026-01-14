@@ -40,7 +40,7 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=ref,event=pr
-            type=sha
+            type=sha,format=long
 
       - name: Build and push image
         id: build
