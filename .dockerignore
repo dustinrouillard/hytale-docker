@@ -1,0 +1,13 @@
+universe/
+mods/
+logs/
+cache/
+.cache/
+
+# Temporary files
+*.log
+*.tmp
+tmp/
+temp/
+
+.auth.json
