@@ -4,7 +4,7 @@
 
 When you first run this docker container it will ask you to go through the device authentication process twice, the first time is for authenticating the game server, and the second one is for authenticating the Hytale Downloader CLI to download the assets and server jar file.
 
-You should only have to do this one time within a 30-day period according to token expiration in the [following article](https://support.hytale.com/hc/en-us/articles/45328341414043-Server-Provider-Authentication-Guide#token-lifecycle).
+According to token lifecycles in the [following article](https://support.hytale.com/hc/en-us/articles/45328341414043-Server-Provider-Authentication-Guide#token-lifecycle), you should only have to do this again if your server is not started for more than 30 days as the refresh token lasts 30 days and is used to renew authentication to create a new game server session before starting.
 
 ### Key Environment Variables
 
