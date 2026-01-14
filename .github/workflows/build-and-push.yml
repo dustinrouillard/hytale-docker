@@ -40,7 +40,7 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=ref,event=pr
-            type=sha,format=long
+            type=sha,format=long,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push image
