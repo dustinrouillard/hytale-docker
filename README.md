@@ -32,7 +32,7 @@ docker run -d \
   -p 5520:5520/udp \
   -v "$(pwd)/data:/data" \
   -v "$(pwd)/main:/opt/hytale" \
-  ghcr.io/dustinrouillard/hytale
+  ghcr.io/dustinrouillard/hytale-docker
 ```
 
 ### Run: Supplying Session Tokens manually
@@ -46,7 +46,7 @@ docker run -d \
   -e HTY_SESSION_TOKEN="SESSION_TOKEN" \
   -v "$(pwd)/data:/data" \
   -v "$(pwd)/main:/opt/hytale" \
-  ghcr.io/dustinrouillard/hytale
+  ghcr.io/dustinrouillard/hytale-docker
 ```
 
 ### Volumes to Persist
