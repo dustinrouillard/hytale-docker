@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+"""
+CurseForge mod synchronization helper for the Hytale Docker image.
+
+The script reads CF_* environment variables to determine which CurseForge
+mods should be present inside the container's mods directory, downloads
+any missing or outdated artifacts, and writes a manifest to keep synchronized
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Dict, List, Optional
+
+
+def log(message: str) -> None:
+    sys.stderr.write(f"[curseforge] {message}\n")
+    sys.stderr.flush()
+
+
+def die(message: str, exit_code: int = 1) -> "NoReturn":
+    log(f"Fatal: {message}")
+    raise SystemExit(exit_code)
+
+
+def getenv_trimmed(name: str, default: str = "") -> str:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    stripped = value.strip()
+    return stripped if stripped else default
+
+
+def getenv_int(name: str, default: int) -> int:
+    raw = getenv_trimmed(name)
+    if not raw:
+        return default
+    try:
+        return int(raw, 10)
+    except ValueError:
+        log(f"Warning: invalid integer for {name!r}: {raw!r}; using {default}")
+        return default
+
+
+def getenv_bool(name: str, default: bool = False) -> bool:
+    raw = getenv_trimmed(name)
+    if not raw:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def split_cf_specs(raw: str) -> List[str]:
+    normalized = raw.replace(",", " ")
+    normalized = normalized.replace("\r", " ").replace("\n", " ")
+    return [token for token in normalized.split() if token]
+
+
+def sanitize_slug(raw: str) -> str:
+    return "".join(ch for ch in raw.lower() if ch.isalnum() or ch in {"-", "_", "."})
+
+
+class RetryError(RuntimeError):
+    """Raised when an HTTP request exhausts all retries."""
+
+
+def request_with_retry(
+    url: str,
+    headers: Dict[str, str],
+    timeout: int,
+    retries: int,
+    backoff_initial: float = 1.0,
+    backoff_max: float = 5.0,
+) -> bytes:
+    attempt = 0
+    delay = backoff_initial
+    while True:
+        attempt += 1
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            message = f"HTTP {exc.code} for {url}: {body.strip()}"
+            if attempt > retries + 1:
+                raise RetryError(message) from exc
+            log(f"{message}; retrying in {delay:.1f}s")
+        except Exception as exc:
+            if attempt > retries + 1:
+                raise RetryError(f"HTTP request failed for {url}: {exc}") from exc
+            log(f"HTTP request error ({exc}); retrying in {delay:.1f}s")
+        time.sleep(delay)
+        delay = min(delay * 2, backoff_max)
+
+
+def http_get_json(
+    api_base: str,
+    path: str,
+    params: Dict[str, str],
+    api_key: str,
+    timeout: int,
+    retries: int,
+) -> Dict:
+    base = api_base.rstrip("/")
+    url = f"{base}{path}"
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "hytale-docker/curseforge-mods",
+        "x-api-key": api_key,
+    }
+    raw = request_with_retry(url, headers, timeout=timeout, retries=retries)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Failed to parse JSON from {url}: {exc}") from exc
+
+
+def fetch_mod(
+    api_base: str,
+    slug: str,
+    api_key: str,
+    game_id: int,
+    timeout: int,
+    retries: int,
+) -> Dict:
+    payload = http_get_json(
+        api_base,
+        "/mods/search",
+        {"gameId": str(game_id), "slug": slug},
+        api_key,
+        timeout,
+        retries,
+    )
+    mods = payload.get("data") or []
+    if not mods:
+        raise RuntimeError(f"CurseForge search returned no results for slug '{slug}'")
+    slug_lower = slug.lower()
+    for mod in mods:
+        if (mod.get("slug") or "").lower() == slug_lower:
+            return mod
+    return mods[0]
+
+
+def fetch_file(
+    api_base: str,
+    mod_id: int,
+    file_id: int,
+    api_key: str,
+    timeout: int,
+    retries: int,
+) -> Dict:
+    payload = http_get_json(
+        api_base,
+        f"/mods/{mod_id}/files/{file_id}",
+        {},
+        api_key,
+        timeout,
+        retries,
+    )
+    data = payload.get("data")
+    if not data:
+        raise RuntimeError(
+            f"CurseForge file lookup returned empty data for mod {mod_id} file {file_id}"
+        )
+    return data
+
+
+def select_latest_file(mod_json: Dict) -> Dict:
+    files = mod_json.get("latestFiles") or []
+    available = [entry for entry in files if entry.get("isAvailable")]
+    if not available:
+        name = mod_json.get("slug") or mod_json.get("name") or "<unknown>"
+        raise RuntimeError(f"Mod '{name}' has no available files")
+    available.sort(key=lambda item: item.get("id", 0))
+    return available[-1]
+
+
+def ensure_directory(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def resolve_relative_path(abs_path: str, data_root: str) -> str:
+    normalized_root = os.path.abspath(data_root)
+    normalized_abs = os.path.abspath(abs_path)
+    prefix = normalized_root.rstrip(os.sep) + os.sep
+    if normalized_abs.startswith(prefix):
+        rel = os.path.relpath(normalized_abs, normalized_root)
+        return rel
+    return normalized_abs.lstrip(os.sep)
+
+
+def load_manifest(path: str) -> List[Dict]:
+    if not os.path.isfile(path):
+        return []
+    with open(path, "r", encoding="utf-8") as fh:
+        try:
+            payload = json.load(fh)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Failed to parse manifest at {path}: {exc}") from exc
+    entries = payload.get("entries")
+    return entries if isinstance(entries, list) else []
+
+
+def save_manifest(
+    path: str,
+    entries: List[Dict],
+    timestamp: str,
+) -> None:
+    if not entries:
+        if os.path.exists(path):
+            os.remove(path)
+            log(f"Removed empty manifest at {path}")
+        return
+
+    payload = {
+        "timestamp": timestamp,
+        "files": [entry.get("filePath") for entry in entries if entry.get("filePath")],
+        "entries": entries,
+    }
+
+    ensure_directory(os.path.dirname(path) or ".")
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(path) or ".",
+        prefix=".cfmanifest.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def download_file(
+    download_url: str,
+    target_path: str,
+    api_key: str,
+    timeout: int,
+    retries: int,
+) -> None:
+    headers = {
+        "User-Agent": "hytale-docker/curseforge-mods",
+        "x-api-key": api_key,
+    }
+    data = request_with_retry(download_url, headers, timeout=timeout, retries=retries)
+    ensure_directory(os.path.dirname(target_path))
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(target_path) or ".",
+        prefix=".cfmod.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp_path, target_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def sync_curseforge_mods(
+    specs: List[str],
+    *,
+    api_key: str,
+    mods_dir: str,
+    manifest_path: str,
+    data_root: str,
+    api_base: str,
+    game_id: int,
+    http_retries: int,
+    http_timeout: int,
+) -> None:
+    ensure_directory(mods_dir)
+
+    existing_entries = load_manifest(manifest_path)
+    previous_by_mod_id: Dict[int, Dict[str, Optional[str]]] = {}
+    for entry in existing_entries:
+        ids = entry.get("ids") or {}
+        mod_id = ids.get("modId")
+        if mod_id is None:
+            continue
+        previous_by_mod_id[int(mod_id)] = {
+            "file_id": ids.get("fileId"),
+            "file_path": entry.get("filePath"),
+            "slug": entry.get("slug"),
+        }
+
+    processed_mod_ids: Dict[int, Dict[str, str]] = {}
+    new_entries: List[Dict[str, object]] = []
+
+    for spec in specs:
+        slug_part = spec
+        explicit_file_id: Optional[int] = None
+        if ":" in spec:
+            slug_part, file_part = spec.split(":", 1)
+            file_part = file_part.strip()
+            if not file_part:
+                die(f"Invalid CF_MODS entry (missing file id): {spec!r}")
+            if not file_part.isdigit():
+                die(f"Invalid file id in CF_MODS entry {spec!r}")
+            explicit_file_id = int(file_part)
+
+        slug = sanitize_slug(slug_part)
+        if not slug:
+            die(f"Encountered empty slug while parsing CF_MODS entry {spec!r}")
+
+        if explicit_file_id is not None:
+            log(f"Resolving CurseForge mod '{slug}' (file {explicit_file_id})")
+        else:
+            log(f"Resolving CurseForge mod '{slug}' (latest file)")
+
+        mod_json = fetch_mod(
+            api_base, slug, api_key, game_id, http_timeout, http_retries
+        )
+
+        mod_id_raw = mod_json.get("id")
+        if mod_id_raw is None:
+            die(f"Mod metadata for slug '{slug}' missing id field")
+        mod_id = int(mod_id_raw)
+        mod_name = mod_json.get("name") or slug
+
+        if explicit_file_id is not None:
+            file_json = fetch_file(
+                api_base, mod_id, explicit_file_id, api_key, http_timeout, http_retries
+            )
+        else:
+            file_json = select_latest_file(mod_json)
+
+        file_id_raw = file_json.get("id")
+        file_name = file_json.get("fileName")
+        download_url = file_json.get("downloadUrl")
+        display_name = file_json.get("displayName") or file_name
+        if file_id_raw is None or not file_name or not download_url:
+            die(f"Incomplete file metadata for mod '{slug}' (mod id {mod_id})")
+
+        file_id = int(file_id_raw)
+        target_path = os.path.join(mods_dir, file_name)
+        rel_path = resolve_relative_path(target_path, data_root)
+
+        prev_info = previous_by_mod_id.get(mod_id)
+        processed_mod_ids[mod_id] = {
+            "slug": slug,
+            "file_id": str(file_id),
+            "file_path": rel_path,
+            "file_name": file_name,
+            "mod_name": mod_name,
+        }
+
+        if prev_info and str(prev_info.get("file_id")) == str(file_id):
+            prev_file_path = prev_info.get("file_path")
+            existing_path = (
+                os.path.join(data_root, prev_file_path)
+                if prev_file_path and not os.path.isabs(prev_file_path)
+                else prev_file_path
+            )
+            existing_path = existing_path or target_path
+            if os.path.isfile(existing_path):
+                if os.path.abspath(existing_path) != os.path.abspath(target_path):
+                    ensure_directory(os.path.dirname(target_path))
+                    shutil.move(existing_path, target_path)
+                    log(f"Renamed existing file for '{slug}' to match target filename")
+                else:
+                    log(f"Mod '{slug}' already up-to-date (file id {file_id})")
+            else:
+                log("Manifest references '%s' but file missing; re-downloading" % slug)
+                download_file(
+                    download_url, target_path, api_key, http_timeout, http_retries
+                )
+        else:
+            log(f"Downloading {display_name} (file id {file_id}) for '{slug}'")
+            download_file(
+                download_url, target_path, api_key, http_timeout, http_retries
+            )
+            if prev_info and prev_info.get("file_path"):
+                old_rel = prev_info["file_path"]
+                absolute_old = (
+                    os.path.join(data_root, old_rel)
+                    if old_rel and not os.path.isabs(old_rel)
+                    else old_rel
+                )
+                if (
+                    absolute_old
+                    and os.path.isfile(absolute_old)
+                    and os.path.abspath(absolute_old) != os.path.abspath(target_path)
+                ):
+                    os.remove(absolute_old)
+                    log(f"Removed outdated file {old_rel} for '{slug}'")
+
+        new_entries.append(
+            {
+                "ids": {"modId": mod_id, "fileId": file_id},
+                "slug": slug,
+                "modName": mod_name,
+                "fileName": file_name,
+                "filePath": rel_path,
+            }
+        )
+
+    for mod_id, prev_info in previous_by_mod_id.items():
+        if mod_id in processed_mod_ids:
+            continue
+        stale_rel = prev_info.get("file_path")
+        stale_slug = prev_info.get("slug") or "unknown"
+        if not stale_rel:
+            continue
+        absolute = (
+            os.path.join(data_root, stale_rel)
+            if not os.path.isabs(stale_rel)
+            else stale_rel
+        )
+        if os.path.isfile(absolute):
+            os.remove(absolute)
+            log(
+                f"Removed stale CurseForge mod file {stale_rel} "
+                f"(mod id {mod_id}, slug {stale_slug}) no longer requested"
+            )
+
+    timestamp = (
+        datetime.datetime.utcnow()
+        .replace(microsecond=0, tzinfo=datetime.timezone.utc)
+        .isoformat()
+    )
+    save_manifest(manifest_path, new_entries, timestamp)
+    log("CurseForge synchronization complete")
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Synchronize CurseForge mods based on CF_* environment variables."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Parse inputs and resolve mods without downloading or writing.",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = parse_args(argv)
+
+    if getenv_bool("CF_MODS_DISABLE_UPDATES"):
+        log("CF_MODS_DISABLE_UPDATES=1 (skipping CurseForge synchronization)")
+        return
+
+    cf_mods_raw = getenv_trimmed("CF_MODS")
+    if not cf_mods_raw:
+        log("CF_MODS not provided; no CurseForge mods to manage")
+        return
+
+    api_key = getenv_trimmed("CF_API_KEY")
+    if not api_key:
+        die("CF_API_KEY must be set to use CurseForge integration")
+
+    mods_dir = getenv_trimmed("CF_MODS_DIR", "/data/mods")
+    manifest_path = getenv_trimmed("CF_MANIFEST_PATH", "/data/.cf-manifest.json")
+    data_root = getenv_trimmed("CF_DATA_ROOT", "/data")
+    api_base = getenv_trimmed("CF_API_BASE_URL", "https://api.curseforge.com/v1")
+    game_id = getenv_int("CF_GAME_ID", 70216)
+    http_retries = max(getenv_int("CF_HTTP_RETRIES", 3), 0)
+    http_timeout = max(getenv_int("CF_HTTP_TIMEOUT", 60), 1)
+
+    specs = split_cf_specs(cf_mods_raw)
+    if not specs:
+        log("CF_MODS contained no usable entries; nothing to do")
+        return
+
+    if args.dry_run:
+        log("Dry run: resolving CurseForge mods without downloading")
+        for spec in specs:
+            slug = sanitize_slug(spec.split(":", 1)[0])
+            if not slug:
+                die(f"Encountered empty slug while parsing CF_MODS entry {spec!r}")
+            log(f"Would process mod '{slug}'")
+        return
+
+    sync_curseforge_mods(
+        specs,
+        api_key=api_key,
+        mods_dir=mods_dir,
+        manifest_path=manifest_path,
+        data_root=data_root,
+        api_base=api_base,
+        game_id=game_id,
+        http_retries=http_retries,
+        http_timeout=http_timeout,
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        die(str(exc))

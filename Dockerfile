@@ -26,8 +26,8 @@ RUN curl -fsSL https://downloader.hytale.com/hytale-downloader.zip -o /tmp/hytal
     && chmod +x /bin/hytale-downloader
 
 COPY --chmod=755 oauth.sh /usr/local/bin/hytale-oauth
-
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/hytale-entrypoint
+COPY --chmod=755 curseforge-mods /usr/local/bin/curseforge-mods
 
 ENV PATH=/bin:/opt/hytale/server:${PATH} \
     HTY_BIND=0.0.0.0:5520 \
@@ -55,10 +55,23 @@ ENV PATH=/bin:/opt/hytale/server:${PATH} \
     OWNER_UUID= \
     HTY_AUTH_PROFILE= \
     PROFILE_USERNAME= \
+    HTY_AUTH_REFRESH_INTERVAL_DAYS=7 \
+    HTY_AUTH_REFRESH_INTERVAL_SECONDS= \
     HTY_AUTH_QUIET=0 \
     HTY_SKIP_AUTH=0 \
     HTY_EXTRA_ARGS= \
-    JAVA_OPTS=
+    JAVA_OPTS= \
+    CF_API_KEY= \
+    CF_MODS= \
+    CF_MODS_DIR=/data/mods \
+    CF_MANIFEST_PATH=/data/.cf-manifest.json \
+    CF_DATA_ROOT=/data \
+    CF_API_BASE_URL=https://api.curseforge.com/v1 \
+    CF_GAME_ID=70216 \
+    CF_HTTP_RETRIES=3 \
+    CF_HTTP_TIMEOUT=60 \
+    CF_MODS_HELPER=/usr/local/bin/curseforge-mods \
+    CF_MODS_DISABLE_UPDATES=0
 
 EXPOSE 5520/udp
 

@@ -10,6 +10,10 @@ PROFILE_USERNAME=${PROFILE_USERNAME:-${HYTALE_PROFILE_USERNAME:-}}
 OWNER_UUID=${OWNER_UUID:-}
 QUIET=${QUIET:-0}
 TOKEN_BUFFER=${TOKEN_BUFFER:-120}
+FORCE_REFRESH=${FORCE_REFRESH:-0}
+FORCE_REFRESH_INTERVAL_SECONDS=${FORCE_REFRESH_INTERVAL_SECONDS:-${AUTH_FORCE_REFRESH_INTERVAL_SECONDS:-${AUTH_REFRESH_INTERVAL_SECONDS:-${HTY_AUTH_REFRESH_INTERVAL_SECONDS:-}}}}
+FORCE_REFRESH_INTERVAL_DAYS=${FORCE_REFRESH_INTERVAL_DAYS:-${AUTH_FORCE_REFRESH_INTERVAL_DAYS:-${AUTH_REFRESH_INTERVAL_DAYS:-${HTY_AUTH_REFRESH_INTERVAL_DAYS:-7}}}}
+
 
 DEVICE_AUTH_URL="https://oauth.accounts.hytale.com/oauth2/device/auth"
 TOKEN_URL="https://oauth.accounts.hytale.com/oauth2/token"
@@ -20,6 +24,11 @@ log() {
   if [[ "${QUIET}" -eq 0 ]]; then
     printf '[oauth] %s\n' "$*" >&2
   fi
+}
+
+die() {
+  printf '[oauth] Fatal: %s\n' "$*" >&2
+  exit 1
 }
 
 usage() {
@@ -34,10 +43,14 @@ Options:
   --quiet                    Reduce logging (only errors)
   --client-id ID             Override OAuth client id (default: hytale-server)
   --scope SCOPE              Override OAuth scope string
+  --force-refresh            Force refresh token exchange even when cached access token is valid
+  --force-refresh-interval D Force refresh when stored credentials are older than D days (set 0 to disable)
+  --force-refresh-interval-seconds S Force refresh when stored credentials are older than S seconds (set 0 to disable)
+  --no-force-refresh         Disable forced refresh behavior for this invocation
   -h, --help                 Display this help and exit
 
 Environment overrides:
-  CLIENT_ID, SCOPE, AUTH_FILE, OWNER_UUID, PROFILE_USERNAME, QUIET, TOKEN_BUFFER
+  CLIENT_ID, SCOPE, AUTH_FILE, OWNER_UUID, PROFILE_USERNAME, QUIET, TOKEN_BUFFER, FORCE_REFRESH, FORCE_REFRESH_INTERVAL_DAYS, FORCE_REFRESH_INTERVAL_SECONDS, AUTH_FORCE_REFRESH_INTERVAL_DAYS, AUTH_FORCE_REFRESH_INTERVAL_SECONDS, AUTH_REFRESH_INTERVAL_DAYS, AUTH_REFRESH_INTERVAL_SECONDS, HTY_AUTH_REFRESH_INTERVAL_DAYS, HTY_AUTH_REFRESH_INTERVAL_SECONDS
 
 The script writes identity/session tokens and OAuth credentials to /data/.auth.json
 (unless overridden) and prints the tokens in the requested format.
@@ -60,6 +73,14 @@ while [[ $# -gt 0 ]]; do
       CLIENT_ID=$2; shift 2;;
     --scope)
       SCOPE=$2; shift 2;;
+    --force-refresh)
+      FORCE_REFRESH=1; shift;;
+    --no-force-refresh)
+      FORCE_REFRESH=0; shift;;
+    --force-refresh-interval)
+      FORCE_REFRESH_INTERVAL_DAYS=$2; shift 2;;
+    --force-refresh-interval-seconds)
+      FORCE_REFRESH_INTERVAL_SECONDS=$2; shift 2;;
     -h|--help)
       usage; exit 0;;
     *)
@@ -487,12 +508,65 @@ ACCESS_TOKEN=${AUTH_ACCESS_TOKEN:-}
 REFRESH_TOKEN=${AUTH_REFRESH_TOKEN:-}
 EXPIRES_AT=${AUTH_EXPIRES_AT:-}
 STORED_OWNER_UUID=${AUTH_OWNER_UUID:-}
+UPDATED_AT=${AUTH_UPDATED_AT:-}
 
 if [[ -z "$OWNER_UUID" && -n "$STORED_OWNER_UUID" ]]; then
   OWNER_UUID=$STORED_OWNER_UUID
 fi
 
-if access_token_valid; then
+force_refresh_required=0
+force_refresh_reason=""
+
+if [[ ${FORCE_REFRESH:-0} -eq 1 ]]; then
+  force_refresh_required=1
+  force_refresh_reason="explicit toggle"
+elif [[ -n ${REFRESH_TOKEN:-} ]]; then
+  interval_seconds=""
+  if [[ -n ${FORCE_REFRESH_INTERVAL_SECONDS:-} ]]; then
+    if [[ ${FORCE_REFRESH_INTERVAL_SECONDS} =~ ^[0-9]+$ ]]; then
+      interval_seconds=${FORCE_REFRESH_INTERVAL_SECONDS}
+    else
+      log "Ignoring invalid FORCE_REFRESH_INTERVAL_SECONDS='${FORCE_REFRESH_INTERVAL_SECONDS}'"
+    fi
+  fi
+  if [[ -z ${interval_seconds:-} ]]; then
+    if [[ ${FORCE_REFRESH_INTERVAL_DAYS:-} =~ ^[0-9]+$ ]]; then
+      interval_seconds=$(( FORCE_REFRESH_INTERVAL_DAYS * 86400 ))
+    else
+      log "Ignoring invalid FORCE_REFRESH_INTERVAL_DAYS='${FORCE_REFRESH_INTERVAL_DAYS}'"
+    fi
+  fi
+  if [[ -n ${interval_seconds:-} ]]; then
+    if (( interval_seconds <= 0 )); then
+      log "OAuth force-refresh interval configured as ${interval_seconds}s; skipping automatic refresh"
+    elif [[ -n ${UPDATED_AT:-} ]]; then
+      if last_epoch=$(iso_to_epoch "$UPDATED_AT"); then
+        now=$(epoch_now)
+        if (( now - last_epoch >= interval_seconds )); then
+          force_refresh_required=1
+          force_refresh_reason="stored credentials older than ${interval_seconds}s"
+        fi
+      else
+        force_refresh_required=1
+        force_refresh_reason="stored updated_at timestamp invalid"
+      fi
+    else
+      force_refresh_required=1
+      force_refresh_reason="missing stored updated_at timestamp"
+    fi
+  fi
+fi
+
+if (( force_refresh_required )) && [[ -z ${force_refresh_reason:-} ]]; then
+  force_refresh_reason="policy trigger"
+fi
+
+if (( force_refresh_required )); then
+  log "Forcing OAuth refresh: ${force_refresh_reason}"
+  if ! obtain_with_refresh; then
+    obtain_with_device_flow
+  fi
+elif access_token_valid; then
   log "Using cached access token (expires at ${EXPIRES_AT})"
 else
   if ! obtain_with_refresh; then
