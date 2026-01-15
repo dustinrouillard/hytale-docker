@@ -53,6 +53,70 @@ build_downloader_args() {
     fi
 }
 
+invoke_downloader() {
+    if [[ $# -eq 0 ]]; then
+        die "Downloader invocation requested without command"
+    fi
+
+    if [[ -t 1 && -t 2 ]]; then
+        "$@"
+        return
+    fi
+
+    log "Downloader stdout/stderr not connected to a TTY; wrapping invocation to stream progress"
+    if command -v python3 >/dev/null 2>&1; then
+        local status=0
+        python3 - "$@" <<'PY'
+import os
+import pty
+import sys
+
+CR = '\r'
+LF = '\n'
+
+
+def master_read(fd):
+    data = os.read(fd, 4096)
+    if not data:
+        return data
+    crlf = (CR + LF).encode('utf-8')
+    lf = LF.encode('utf-8')
+    cr = CR.encode('utf-8')
+    data = data.replace(crlf, lf)
+    data = data.replace(cr, lf)
+    return data
+
+
+def main():
+    cmd = sys.argv[1:]
+    if not cmd:
+        return 1
+    try:
+        status = pty.spawn(cmd, master_read=master_read)
+    except Exception as exc:
+        print(f"[hytale-entrypoint] Failed to create pseudo-terminal for downloader: {exc}", file=sys.stderr)
+        return 1
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+PY
+        status=$?
+        if [[ $status -ne 0 ]]; then
+            return $status
+        fi
+        return 0
+    fi
+
+    log "Pseudo-terminal helper unavailable (python3 not found); invoking downloader directly"
+    "$@"
+}
+
 download_server_artifacts() {
     ensure_downloader_binary
 
@@ -71,7 +135,7 @@ download_server_artifacts() {
     build_downloader_args downloader_args
 
     export HOME="$downloader_home"
-    if ! "$HTY_DOWNLOADER_BINARY" "${downloader_args[@]}" -download-path "$download_tmp"; then
+    if ! invoke_downloader "$HTY_DOWNLOADER_BINARY" "${downloader_args[@]}" -download-path "$download_tmp"; then
         die "Downloader failed to retrieve server package"
     fi
 
