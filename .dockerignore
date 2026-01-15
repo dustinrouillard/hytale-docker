@@ -11,3 +11,4 @@ tmp/
 temp/
 
 .auth.json
+utils/rcon-cli/target/

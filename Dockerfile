@@ -1,4 +1,9 @@
 # syntax=docker/dockerfile:1.5
+FROM rust:1.92-bookworm AS rcon-builder
+WORKDIR /workspace
+COPY utils/rcon-cli/ /workspace/
+RUN cargo build --release
+
 FROM eclipse-temurin:25-jdk-jammy
 
 LABEL org.opencontainers.image.title="Hytale Dedicated Server"
@@ -28,6 +33,7 @@ RUN curl -fsSL https://downloader.hytale.com/hytale-downloader.zip -o /tmp/hytal
 COPY --chmod=755 oauth.sh /usr/local/bin/hytale-oauth
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/hytale-entrypoint
 COPY --chmod=755 curseforge-mods /usr/local/bin/curseforge-mods
+COPY --from=rcon-builder /workspace/target/release/rcon-cli /usr/local/bin/rcon-cli
 
 ENV PATH=/bin:/opt/hytale/server:${PATH} \
     HTY_BIND=0.0.0.0:5520 \
@@ -61,6 +67,8 @@ ENV PATH=/bin:/opt/hytale/server:${PATH} \
     HTY_SKIP_AUTH=0 \
     HTY_EXTRA_ARGS= \
     JAVA_OPTS= \
+    RCON_PASSWORD=hytale \
+    RCON_BIND=0.0.0.0:25900 \
     CF_API_KEY='$2a$10$bL4bIL5pUWqfcO7KQtnMReakwtfHbNKh6v1uTpKlzhwoueEJQnPnm' \
     CF_MODS= \
     CF_MODS_DIR=/data/mods \
@@ -73,7 +81,7 @@ ENV PATH=/bin:/opt/hytale/server:${PATH} \
     CF_MODS_HELPER=/usr/local/bin/curseforge-mods \
     CF_MODS_DISABLE_UPDATES=0
 
-EXPOSE 5520/udp
+EXPOSE 5520/udp 25900/tcp
 
 ENTRYPOINT ["/usr/local/bin/hytale-entrypoint"]
 

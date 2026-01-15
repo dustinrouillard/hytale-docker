@@ -483,6 +483,7 @@ start_refresh_maintenance() {
         done
     ) &
     AUTH_REFRESH_MAINTENANCE_PID=$!
+    export AUTH_REFRESH_MAINTENANCE_PID
 }
 
 build_command() {
@@ -588,6 +589,60 @@ main() {
     : "${HTY_AUTH_REFRESH_INTERVAL_SECONDS:=}"
     : "${HTY_AUTH_QUIET:=0}"
     : "${HTY_SKIP_AUTH:=0}"
+
+    if [[ -n ${HTY_RCON_ENABLED+x} && -z ${RCON_ENABLED+x} ]]; then
+        RCON_ENABLED=$HTY_RCON_ENABLED
+    fi
+    if [[ -n ${HTY_RCON_BIND+x} && -z ${RCON_BIND+x} ]]; then
+        RCON_BIND=$HTY_RCON_BIND
+    fi
+    if [[ -n ${HTY_RCON_PASSWORD+x} && -z ${RCON_PASSWORD+x} ]]; then
+        RCON_PASSWORD=$HTY_RCON_PASSWORD
+    fi
+    if [[ -n ${HTY_RCON_RESPONSE_TIMEOUT_MS+x} && -z ${RCON_RESPONSE_TIMEOUT_MS+x} ]]; then
+        RCON_RESPONSE_TIMEOUT_MS=$HTY_RCON_RESPONSE_TIMEOUT_MS
+    fi
+    if [[ -n ${HTY_RCON_LOG_COMMANDS+x} && -z ${RCON_LOG_COMMANDS+x} ]]; then
+        RCON_LOG_COMMANDS=$HTY_RCON_LOG_COMMANDS
+    fi
+    if [[ -n ${HTY_RCON_BINARY+x} && -z ${RCON_BINARY+x} ]]; then
+        RCON_BINARY=$HTY_RCON_BINARY
+    fi
+    if [[ -n ${HTY_RCON_CHILD_COMMAND+x} && -z ${RCON_CHILD_COMMAND+x} ]]; then
+        RCON_CHILD_COMMAND=$HTY_RCON_CHILD_COMMAND
+    fi
+    if [[ -n ${HTY_RCON_CHILD_DIR+x} && -z ${RCON_CHILD_DIR+x} ]]; then
+        RCON_CHILD_DIR=$HTY_RCON_CHILD_DIR
+    fi
+    if [[ -n ${HTY_RCON_CHILD_ARG+x} && -z ${RCON_CHILD_ARG+x} ]]; then
+        RCON_CHILD_ARG=$HTY_RCON_CHILD_ARG
+    fi
+    if [[ -n ${HTY_RCON_RESPAWN+x} && -z ${RCON_RESPAWN+x} ]]; then
+        RCON_RESPAWN=$HTY_RCON_RESPAWN
+    fi
+    if [[ -n ${HTY_RCON_RESPAWN_BACKOFF_MS+x} && -z ${RCON_RESPAWN_BACKOFF_MS+x} ]]; then
+        RCON_RESPAWN_BACKOFF_MS=$HTY_RCON_RESPAWN_BACKOFF_MS
+    fi
+    if [[ -n ${HTY_RCON_HOST+x} && -z ${RCON_HOST+x} ]]; then
+        RCON_HOST=$HTY_RCON_HOST
+    fi
+    if [[ -n ${HTY_RCON_PORT+x} && -z ${RCON_PORT+x} ]]; then
+        RCON_PORT=$HTY_RCON_PORT
+    fi
+
+    : "${RCON_ENABLED:=1}"
+    : "${RCON_BIND:=0.0.0.0:25900}"
+    : "${RCON_PASSWORD:=hytale}"
+    : "${RCON_RESPONSE_TIMEOUT_MS:=2000}"
+    : "${RCON_LOG_COMMANDS:=0}"
+    : "${RCON_BINARY:=/usr/local/bin/rcon-cli}"
+    : "${RCON_CHILD_COMMAND:=}"
+    : "${RCON_CHILD_DIR:=/data}"
+    : "${RCON_CHILD_ARG:=}"
+    : "${RCON_RESPAWN:=0}"
+    : "${RCON_RESPAWN_BACKOFF_MS:=5000}"
+    : "${RCON_HOST:=127.0.0.1}"
+    : "${RCON_PORT:=25900}"
     : "${CF_MODS_HELPER:=/usr/local/bin/curseforge-mods}"
     : "${CF_MODS_DISABLE_UPDATES:=0}"
     OWNER_UUID=${OWNER_UUID:-}
@@ -675,6 +730,36 @@ main() {
 
     local cmd=()
     build_command cmd "$@"
+
+    local rcon_enable_normalized="${RCON_ENABLED,,}"
+    if [[ $rcon_enable_normalized == 1 || $rcon_enable_normalized == true || $rcon_enable_normalized == yes || $rcon_enable_normalized == on ]]; then
+        local child_command="${RCON_CHILD_COMMAND:-${cmd[0]}}"
+        if [[ -z ${child_command:-} ]]; then
+            die "Unable to determine server launch command for RCON proxy"
+        fi
+
+        local rcon_args=(
+            server
+            --bind "$RCON_BIND"
+            --password "$RCON_PASSWORD"
+            --response-timeout-ms "$RCON_RESPONSE_TIMEOUT_MS"
+            --child-command "$child_command"
+            --child-dir "$RCON_CHILD_DIR"
+        )
+        local rcon_log_commands_normalized="${RCON_LOG_COMMANDS,,}"
+        if [[ $rcon_log_commands_normalized == 1 || $rcon_log_commands_normalized == true || $rcon_log_commands_normalized == yes || $rcon_log_commands_normalized == on ]]; then
+            rcon_args+=(--log-commands)
+        fi
+        if [[ -n ${RCON_CHILD_ARG:-} ]]; then
+            rcon_args+=(--child-arg "$RCON_CHILD_ARG")
+        fi
+        for arg in "${cmd[@]:1}"; do
+            rcon_args+=(--child-arg "$arg")
+        done
+
+        exec "$RCON_BINARY" "${rcon_args[@]}"
+    fi
+
     exec "${cmd[@]}"
 }
 
