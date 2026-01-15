@@ -44,7 +44,6 @@ Set `CF_API_KEY` to your CurseForge API key and populate `CF_MODS` with the mods
 docker run -d \
   --name hytale \
   -p 5520:5520/udp \
-  -p 25900:25900/tcp \
   -v "$(pwd)/data:/data" \
   -v "$(pwd)/main:/opt/hytale" \
   -v "/etc/machine-id:/etc/machine-id:ro" \
@@ -57,7 +56,6 @@ docker run -d \
 docker run -d \
   --name hytale \
   -p 5520:5520/udp \
-  -p 25900:25900/tcp \
   -e CF_API_KEY="YOUR_CF_API_KEY" \
   -e CF_MODS="adminui,spark" \
   -v "$(pwd)/data:/data" \
@@ -73,7 +71,6 @@ docker run -d \
 docker run -d \
   --name hytale \
   -p 5520:5520/udp \
-  -p 25900:25900/tcp \
   -e HTY_IDENTITY_TOKEN="IDENTITY_TOKEN" \
   -e HTY_SESSION_TOKEN="SESSION_TOKEN" \
   -v "$(pwd)/data:/data" \
