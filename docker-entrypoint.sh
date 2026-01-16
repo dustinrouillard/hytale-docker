@@ -30,6 +30,498 @@ split_words() {
     fi
 }
 
+resolve_python_bin() {
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' python3
+        return 0
+    fi
+    if command -v python >/dev/null 2>&1; then
+        printf '%s' python
+        return 0
+    fi
+    return 1
+}
+
+sanitize_unsigned_integer() {
+    local value=$1
+    local default_value=$2
+    local var_name=$3
+    if [[ $value =~ ^[0-9]+$ ]]; then
+        printf '%s' "$value"
+        return
+    fi
+    if [[ -n ${value// } ]]; then
+        log "Ignoring invalid ${var_name}='${value}' (expected non-negative integer)"
+    fi
+    printf '%s' "$default_value"
+}
+
+render_server_config() {
+    local config_path=${HTY_CONFIG_PATH:-/data/config.json}
+    local config_dir
+    config_dir=$(dirname "$config_path")
+    mkdir -p "$config_dir"
+
+    local python_bin
+    if ! python_bin=$(resolve_python_bin); then
+        die "render_server_config requires python but it was not found in PATH"
+    fi
+
+    local server_name=${HTY_SERVER_NAME:-Hytale Server}
+    local motd=${HTY_SERVER_MOTD:-Docker Hytale Server}
+    local password=${HTY_SERVER_PASSWORD:-}
+    local default_mode=${HTY_DEFAULT_GAME_MODE:-Adventure}
+    local default_world=${HTY_DEFAULT_WORLD_NAME:-default}
+    local max_players
+    max_players=$(sanitize_unsigned_integer "$HTY_MAX_PLAYERS" 100 HTY_MAX_PLAYERS)
+    local max_view_radius
+    max_view_radius=$(sanitize_unsigned_integer "$HTY_MAX_VIEW_RADIUS" 32 HTY_MAX_VIEW_RADIUS)
+
+    local tmp_file=""
+    tmp_file=$(mktemp "${config_path}.XXXXXX") || tmp_file=""
+    if [[ -z $tmp_file ]]; then
+        log "Unable to allocate temporary file for config render; writing directly to ${config_path}"
+        tmp_file="$config_path"
+    fi
+
+    if ! CONFIG_PATH="$config_path" \
+         TMP_PATH="$tmp_file" \
+         SERVER_NAME="$server_name" \
+         MOTD="$motd" \
+         PASSWORD="$password" \
+         DEFAULT_WORLD="$default_world" \
+         DEFAULT_MODE="$default_mode" \
+         MAX_PLAYERS="$max_players" \
+         MAX_VIEW_RADIUS="$max_view_radius" \
+         "$python_bin" <<'PY'
+import json
+import os
+import sys
+
+baseline = {
+    "Version": 3,
+    "ServerName": "Hytale Server",
+    "MOTD": "Docker Hytale Server",
+    "Password": "",
+    "MaxPlayers": 100,
+    "MaxViewRadius": 32,
+    "LocalCompressionEnabled": False,
+    "Defaults": {
+        "World": "default",
+        "GameMode": "Adventure",
+    },
+    "ConnectionTimeouts": {
+        "JoinTimeouts": {},
+    },
+    "RateLimit": {},
+    "Modules": {},
+    "LogLevels": {},
+    "Mods": {},
+    "DisplayTmpTagsInStrings": False,
+    "PlayerStorage": {
+        "Type": "Hytale",
+    },
+}
+
+def clone(obj):
+    return json.loads(json.dumps(obj))
+
+config_path = os.environ["CONFIG_PATH"]
+tmp_path = os.environ["TMP_PATH"]
+
+def load_config(path, fallback):
+    if not os.path.exists(path):
+        return clone(fallback)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        print(f"[hytale-entrypoint] Existing config at {path} is invalid; regenerating from baseline", file=sys.stderr)
+        return clone(fallback)
+    if not isinstance(data, dict):
+        print(f"[hytale-entrypoint] Existing config at {path} is invalid; regenerating from baseline", file=sys.stderr)
+        return clone(fallback)
+    return data
+
+config = load_config(config_path, baseline)
+
+defaults = config.get("Defaults")
+if not isinstance(defaults, dict):
+    defaults = {}
+    config["Defaults"] = defaults
+
+config["ServerName"] = os.environ["SERVER_NAME"]
+config["MOTD"] = os.environ["MOTD"]
+config["Password"] = os.environ["PASSWORD"]
+config["MaxPlayers"] = int(os.environ["MAX_PLAYERS"])
+config["MaxViewRadius"] = int(os.environ["MAX_VIEW_RADIUS"])
+defaults["World"] = os.environ["DEFAULT_WORLD"]
+defaults["GameMode"] = os.environ["DEFAULT_MODE"]
+
+with open(tmp_path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2, ensure_ascii=False)
+    handle.write("\n")
+PY
+    then
+        [[ "$tmp_file" != "$config_path" ]] && rm -f "$tmp_file"
+        die "Failed to update ${config_path} using python"
+    fi
+
+    log "Updated server config at ${config_path}"
+    chmod 0644 "$tmp_file"
+    if [[ "$tmp_file" != "$config_path" ]]; then
+        mv -f "$tmp_file" "$config_path"
+    fi
+
+    HTY_MAX_PLAYERS=$max_players
+    HTY_MAX_VIEW_RADIUS=$max_view_radius
+}
+
+maybe_update_default_world_config() {
+    local seed="${HTY_DEFAULT_WORLD_SEED:-}"
+    local pvp="${HTY_PVP_ENABLED:-}"
+    local fall="${HTY_FALL_DAMAGE_ENABLED:-}"
+
+    if [[ -z ${seed// } && -z ${pvp// } && -z ${fall// } ]]; then
+        return
+    fi
+
+    local python_bin
+    if ! python_bin=$(resolve_python_bin); then
+        die "Updating world config requires python but it was not found in PATH"
+    fi
+
+    local config_path=${HTY_CONFIG_PATH:-/data/config.json}
+    local world_name="${HTY_DEFAULT_WORLD_NAME:-}"
+    local world_name_provided="${HTY_DEFAULT_WORLD_NAME_WAS_SET:-0}"
+    local tmp_path=""
+    tmp_path=$(mktemp) || tmp_path=""
+    if [[ -z $tmp_path ]]; then
+        die "Unable to allocate temporary file for world config rewrite"
+    fi
+
+    local python_output=""
+    if ! python_output=$(
+        CONFIG_PATH="$config_path" \
+        WORLD_NAME="$world_name" \
+        WORLD_NAME_PROVIDED="$world_name_provided" \
+        WORLD_SEED="$seed" \
+        WORLD_PVP="$pvp" \
+        WORLD_FALL="$fall" \
+        TMP_PATH="$tmp_path" \
+        "$python_bin" <<'PY'
+import json
+import os
+import sys
+
+config_path = os.environ.get("CONFIG_PATH", "/data/config.json")
+world_name_provided = os.environ.get("WORLD_NAME_PROVIDED") == "1"
+requested_world = os.environ.get("WORLD_NAME", "").strip()
+seed_value = os.environ.get("WORLD_SEED", "")
+pvp_value = os.environ.get("WORLD_PVP", "")
+fall_value = os.environ.get("WORLD_FALL", "")
+tmp_path = os.environ["TMP_PATH"]
+
+if not world_name_provided:
+    requested_world = ""
+
+seed_set = bool(seed_value.strip())
+pvp_set = bool(pvp_value.strip())
+fall_set = bool(fall_value.strip())
+
+if not (seed_set or pvp_set or fall_set):
+    print("no_change", end="")
+    sys.exit(0)
+
+def resolve_world_name():
+    if requested_world.strip():
+        return requested_world.strip()
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                defaults = data.get("Defaults")
+                if isinstance(defaults, dict):
+                    world = defaults.get("World")
+                    if isinstance(world, str) and world.strip():
+                        return world.strip()
+        except Exception:
+            pass
+    return "default"
+
+world_name = resolve_world_name()
+world_config_path = f"/data/universe/worlds/{world_name}/config.json"
+config_exists = os.path.exists(world_config_path)
+
+baseline = {
+    "Version": 4,
+    "Seed": 1768323044857,
+    "IsPvpEnabled": False,
+    "IsFallDamageEnabled": True,
+}
+
+def parse_bool(value):
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(value)
+
+def load_config():
+    if config_exists:
+        try:
+            with open(world_config_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return dict(baseline)
+
+config = load_config()
+changed = False
+
+if seed_set:
+    try:
+        new_seed = int(seed_value, 10)
+    except Exception as exc:
+        print(f"[hytale-entrypoint] Invalid HTY_DEFAULT_WORLD_SEED value: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if (not config_exists or "Seed" not in config) and config.get("Seed") != new_seed:
+        config["Seed"] = new_seed
+        changed = True
+
+if pvp_set:
+    try:
+        new_pvp = parse_bool(pvp_value)
+    except Exception as exc:
+        print(f"[hytale-entrypoint] Invalid HTY_PVP_ENABLED value: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if config.get("IsPvpEnabled") != new_pvp:
+        config["IsPvpEnabled"] = new_pvp
+        changed = True
+
+if fall_set:
+    try:
+        new_fall = parse_bool(fall_value)
+    except Exception as exc:
+        print(f"[hytale-entrypoint] Invalid HTY_FALL_DAMAGE_ENABLED value: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if config.get("IsFallDamageEnabled") != new_fall:
+        config["IsFallDamageEnabled"] = new_fall
+        changed = True
+
+if not changed:
+    print("no_change", end="")
+    sys.exit(0)
+
+os.makedirs(os.path.dirname(world_config_path), exist_ok=True)
+
+with open(tmp_path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2, ensure_ascii=False)
+    handle.write("\n")
+
+print(world_config_path, end="")
+PY
+    ); then
+        rm -f "$tmp_path"
+        die "Failed to update world config"
+    fi
+
+    if [[ $python_output == "no_change" ]]; then
+        rm -f "$tmp_path"
+        return
+    fi
+
+    chmod 0644 "$tmp_path"
+    mv -f "$tmp_path" "$python_output"
+    log "Updated world config at ${python_output}"
+}
+
+maybe_configure_permissions() {
+    local permissions_path=/data/permissions.json
+    local python_bin
+
+    if [[ -z ${HTY_OWNER_UUID// } && -z ${HTY_OP_UUIDS// } ]]; then
+        return
+    fi
+
+    if ! python_bin=$(resolve_python_bin); then
+        die "Updating permissions requires python but it was not found in PATH"
+    fi
+
+    local permissions_dir
+    permissions_dir=$(dirname "$permissions_path")
+    mkdir -p "$permissions_dir"
+
+    local tmp_path
+    if ! tmp_path=$(mktemp "${permissions_path}.XXXXXX"); then
+        die "Unable to allocate temporary file for permissions update"
+    fi
+
+    local python_output=""
+    if ! python_output=$(
+        PERMISSIONS_PATH="$permissions_path" \
+        TMP_PATH="$tmp_path" \
+        OWNER_UUID="$HTY_OWNER_UUID" \
+        OP_OWNER="$HTY_OP_OWNER" \
+        OP_UUIDS_RAW="$HTY_OP_UUIDS" \
+        "$python_bin" <<'PY'
+import json
+import os
+import sys
+from collections import OrderedDict
+
+TRUE_VALUES = {"1", "true", "yes", "on"}
+FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def parse_bool(value, name, default):
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in TRUE_VALUES:
+        return True
+    if normalized in FALSE_VALUES or normalized == "":
+        return False
+    print(f"[hytale-entrypoint] Ignoring invalid {name}='{value}' (expected boolean)", file=sys.stderr)
+    return default
+
+
+permissions_path = os.environ["PERMISSIONS_PATH"]
+tmp_path = os.environ["TMP_PATH"]
+owner_uuid = os.environ.get("OWNER_UUID", "").strip()
+op_owner_raw = os.environ.get("OP_OWNER")
+op_uuids_raw = os.environ.get("OP_UUIDS_RAW", "")
+
+op_owner_enabled = parse_bool(op_owner_raw, "HTY_OP_OWNER", False)
+
+uuid_candidates = []
+if op_uuids_raw:
+    tokens = op_uuids_raw.replace(",", " ").split()
+    for token in tokens:
+        token = token.strip()
+        if token:
+            uuid_candidates.append(token)
+
+if op_owner_enabled and owner_uuid:
+    uuid_candidates.append(owner_uuid)
+
+unique_uuids = []
+seen = set()
+for token in uuid_candidates:
+    if token in seen:
+        continue
+    seen.add(token)
+    unique_uuids.append(token)
+
+should_run = bool(unique_uuids)
+if not should_run:
+    print("no_change", end="")
+    sys.exit(0)
+
+
+def baseline_permissions():
+    return OrderedDict([("users", {}), ("groups", {"Default": []})])
+
+
+changed = False
+if os.path.exists(permissions_path):
+    try:
+        with open(permissions_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        print(
+            f"[hytale-entrypoint] Existing permissions at {permissions_path} is invalid; regenerating baseline",
+            file=sys.stderr,
+        )
+        data = baseline_permissions()
+        changed = True
+    else:
+        if not isinstance(data, dict):
+            print(
+                f"[hytale-entrypoint] Existing permissions at {permissions_path} is invalid; regenerating baseline",
+                file=sys.stderr,
+            )
+            data = baseline_permissions()
+            changed = True
+        else:
+            data = OrderedDict(data)
+else:
+    data = baseline_permissions()
+
+users = data.get("users")
+if not isinstance(users, dict):
+    users = {}
+    data["users"] = users
+    changed = True
+
+groups = data.get("groups")
+if not isinstance(groups, dict):
+    groups = {}
+    data["groups"] = groups
+    changed = True
+
+op_permissions = groups.get("OP")
+if not isinstance(op_permissions, list):
+    op_permissions = []
+    groups["OP"] = op_permissions
+    changed = True
+if "*" not in op_permissions:
+    op_permissions.append("*")
+    changed = True
+
+default_permissions = groups.get("Default")
+if not isinstance(default_permissions, list):
+    default_permissions = []
+    groups["Default"] = default_permissions
+    changed = True
+
+for uuid in unique_uuids:
+    entry = users.get(uuid)
+    if not isinstance(entry, dict):
+        entry = {}
+        users[uuid] = entry
+        changed = True
+    user_groups = entry.get("groups")
+    if not isinstance(user_groups, list):
+        user_groups = []
+        entry["groups"] = user_groups
+        changed = True
+    if "Adventure" not in user_groups:
+        user_groups.append("Adventure")
+        changed = True
+    if "OP" not in user_groups:
+        user_groups.append("OP")
+        changed = True
+
+if not changed:
+    print("no_change", end="")
+    sys.exit(0)
+
+with open(tmp_path, "w", encoding="utf-8") as handle:
+    json.dump(data, handle, indent=2, ensure_ascii=False)
+    handle.write("\n")
+
+print("updated", end="")
+PY
+    ); then
+        rm -f "$tmp_path"
+        die "Failed to update permissions configuration"
+    fi
+
+    if [[ $python_output == "no_change" ]]; then
+        rm -f "$tmp_path"
+        return
+    fi
+
+    chmod 0644 "$tmp_path"
+    mv -f "$tmp_path" "$permissions_path"
+    log "Updated permissions config at ${permissions_path}"
+}
+
 ensure_downloader_binary() {
     if [[ ! -x "$HTY_DOWNLOADER_BINARY" ]]; then
         die "Downloader binary not found or not executable at $HTY_DOWNLOADER_BINARY"
@@ -603,6 +1095,14 @@ build_command() {
         --bind "$HTY_BIND"
         --auth-mode "$HTY_AUTH_MODE"
     )
+    local allow_op_normalized="${HTY_OP_SELF,,}"
+    if [[ $allow_op_normalized == 1 || $allow_op_normalized == true || $allow_op_normalized == yes || $allow_op_normalized == on ]]; then
+        _cmd_ref+=(--allow-op)
+    fi
+    local accept_plugins_normalized="${HTY_ACCEPT_EARLY_PLUGINS,,}"
+    if [[ $accept_plugins_normalized == 1 || $accept_plugins_normalized == true || $accept_plugins_normalized == yes || $accept_plugins_normalized == on ]]; then
+        _cmd_ref+=(--accept-early-plugins)
+    fi
     if [[ -n ${HTY_IDENTITY_TOKEN// } ]]; then
         _cmd_ref+=(--identity-token "$HTY_IDENTITY_TOKEN")
     fi
@@ -653,6 +1153,24 @@ main() {
     : "${HTY_AUTH_REFRESH_INTERVAL_SECONDS:=}"
     : "${HTY_AUTH_QUIET:=0}"
     : "${HTY_SKIP_AUTH:=0}"
+    : "${HTY_SERVER_NAME:=Hytale Server}"
+    : "${HTY_SERVER_MOTD:=Docker Hytale Server}"
+    : "${HTY_SERVER_PASSWORD:=}"
+    : "${HTY_DEFAULT_GAME_MODE:=Adventure}"
+    local hty_default_world_name_was_set=0
+    if [[ -n ${HTY_DEFAULT_WORLD_NAME+x} && -n ${HTY_DEFAULT_WORLD_NAME// } ]]; then
+        hty_default_world_name_was_set=1
+    fi
+    HTY_DEFAULT_WORLD_NAME_WAS_SET=$hty_default_world_name_was_set
+    : "${HTY_DEFAULT_WORLD_NAME:=default}"
+    : "${HTY_MAX_PLAYERS:=100}"
+    : "${HTY_MAX_VIEW_RADIUS:=32}"
+    : "${HTY_CONFIG_PATH:=/data/config.json}"
+
+    : "${HTY_OP_OWNER:=0}"
+    : "${HTY_OP_UUIDS:=}"
+    : "${HTY_OP_SELF:=0}"
+    : "${HTY_ACCEPT_EARLY_PLUGINS:=0}"
 
     if [[ -n ${HTY_RCON_ENABLED+x} && -z ${RCON_ENABLED+x} ]]; then
         RCON_ENABLED=$HTY_RCON_ENABLED
@@ -780,6 +1298,9 @@ main() {
     bootstrap_server_artifacts
     perform_auto_update_if_needed
     maybe_sync_curseforge_mods
+    render_server_config
+    maybe_update_default_world_config
+    maybe_configure_permissions
 
     [[ -f "$HTY_JAR" ]] || die "HytaleServer.jar not available at $HTY_JAR after bootstrap"
     [[ -f "$HTY_ASSETS" ]] || die "Assets.zip not available at $HTY_ASSETS after bootstrap"

@@ -24,6 +24,20 @@ According to token lifecycles in the [following article](https://support.hytale.
 | `HTY_AUTH_REFRESH_INTERVAL_DAYS` | `7` | Number of days between background OAuth refresh attempts (ignored when seconds value is provided). |
 | `HTY_AUTH_REFRESH_INTERVAL_SECONDS` | _(empty)_ | Overrides the refresh interval in seconds; set to `0` or leave unset to disable the background refresher. |
 | `HTY_SKIP_AUTH` | `0` | Set to `1` to bypass automatic OAuth bootstrap (expects tokens via env or file, and a pre-existing server jar with assets zip). |
+| `HTY_SERVER_NAME` | `Hytale Server` | Sets the `ServerName` field written to the generated `config.json`. |
+| `HTY_SERVER_MOTD` | `Docker Hytale Server` | Message-of-the-day stored in `config.json`. |
+| `HTY_SERVER_PASSWORD` | _(empty)_ | Password players must provide when joining. |
+| `HTY_DEFAULT_GAME_MODE` | `Adventure` | Sets `Defaults.GameMode` in the generated configuration. |
+| `HTY_DEFAULT_WORLD_NAME` | `default` | Sets `Defaults.World` for new player spawns. |
+| `HTY_DEFAULT_WORLD_SEED` | _(empty)_ | When set, writes a world config to `/data/universe/worlds/<world>/config.json` with the provided numeric seed. |
+| `HTY_PVP_ENABLED` | _(empty)_ | When set, toggles `IsPvpEnabled` in the default world's config (`true`/`false`). |
+| `HTY_FALL_DAMAGE_ENABLED` | _(empty)_ | When set, toggles `IsFallDamageEnabled` in the default world's config (`true`/`false`). |
+| `HTY_OP_OWNER` | `0` | When set to `1`, automatically grants the owner UUID to the `OP` group inside `/data/permissions.json`. |
+| `HTY_OP_UUIDS` | _(empty)_ | Comma/space separated UUIDs to grant `OP`; each user is ensured to belong to the `Adventure` and `OP` groups. |
+| `HTY_OP_SELF` | `0` | When set to `1`, passes `--allow-op` to the server so players can run `/op self`. |
+| `HTY_ACCEPT_EARLY_PLUGINS` | `0` | When set to `1`, passes `--accept-early-plugins`; unsupported early plugins may cause stability issues. |
+| `HTY_MAX_PLAYERS` | `100` | Maximum simultaneous players permitted. |
+| `HTY_MAX_VIEW_RADIUS` | `32` | Maximum chunk/view radius advertised by the server. |
 | `CF_MODS` | _(empty)_ | Comma/space separated list of CurseForge slugs (optionally `slug:fileId`) to sync into `/data/mods`. |
 | `CF_API_KEY` | _(empty)_ | CurseForge API key used for authenticated API and download requests. |
 | `CF_MODS_DISABLE_UPDATES` | `0` | Set to `1` to skip CurseForge synchronization during startup. |
@@ -31,7 +45,7 @@ According to token lifecycles in the [following article](https://support.hytale.
 | `RCON_BIND` | `0.0.0.0:25900` | Address/port the proxy will bind to. |
 | `RCON_PASSWORD` | `hytale` | Shared secret required by clients. |
 
-Legacy `HTY_RCON_*` variables remain supported for compatibility, but prefer the new `RCON_*` names above. If `HTY_IDENTITY_TOKEN` / `HTY_SESSION_TOKEN` are not supplied, the entrypoint invokes `/usr/local/bin/hytale-oauth` to complete the device authentication flow automatically. Credentials are written to `/data/.auth.json`, and helper options accept the `AUTH_*` aliases (for example `AUTH_OWNER_UUID`, `AUTH_PROFILE`, `AUTH_HELPER`). After the initial bootstrap completes, the entrypoint schedules a background refresh loop that re-invokes the helper with `--force-refresh` on a default seven-day cadence (configurable via `HTY_AUTH_REFRESH_INTERVAL_SECONDS` or `HTY_AUTH_REFRESH_INTERVAL_DAYS`). Set `HTY_AUTH_REFRESH_INTERVAL_SECONDS=0` (or leave both interval variables empty) to disable the maintenance loop entirely. Set `HTY_SKIP_AUTH=1` (or `SKIP_AUTH=1`) to disable this bootstrap when you plan to manage tokens yourself.
+If `HTY_IDENTITY_TOKEN` / `HTY_SESSION_TOKEN` are not supplied, the entrypoint invokes our `hytale-oauth` utility to complete the device authentication flow automatically. Credentials are written to `/data/.auth.json`, and helper options accept the `HTY_AUTH_*` aliases (for example `HTY_AUTH_OWNER_UUID`, `HTY_AUTH_PROFILE`, `HTY_AUTH_HELPER`). After the initial bootstrap completes, the entrypoint schedules a background refresh loop that re-invokes the helper with `--force-refresh` on a default seven-day cadence (configurable via `HTY_AUTH_REFRESH_INTERVAL_SECONDS` or `HTY_AUTH_REFRESH_INTERVAL_DAYS`). Set `HTY_AUTH_REFRESH_INTERVAL_SECONDS=0` (or leave both interval variables empty) to disable the maintenance loop entirely. Set `HTY_SKIP_AUTH=1` to disable this bootstrap when you plan to manage tokens yourself.
 
 ### CurseForge Mod Downloads
 
@@ -56,7 +70,6 @@ docker run -d \
 docker run -d \
   --name hytale \
   -p 5520:5520/udp \
-  -e CF_API_KEY="YOUR_CF_API_KEY" \
   -e CF_MODS="adminui,spark" \
   -v "$(pwd)/data:/data" \
   -v "$(pwd)/main:/opt/hytale" \
@@ -65,7 +78,7 @@ docker run -d \
 ```
 
 ### Example: Supplying Session Tokens manually
-*You should just use the above option if you want to make it easy, since it handles all the oauth logic for you*
+*You should just use the above options if you want to make it easy, since it handles all the oauth logic for you*
 
 ```sh
 docker run -d \
@@ -77,6 +90,25 @@ docker run -d \
   -v "$(pwd)/main:/opt/hytale" \
   -v "/etc/machine-id:/etc/machine-id:ro" \
   ghcr.io/dustinrouillard/hytale-docker
+```
+
+### Example Docker Compose
+
+```yaml
+services:
+  hytale:
+    image: ghcr.io/dustinrouillard/hytale-docker
+    restart: always
+    ports:
+      - 5520:5520/udp
+      - 25900:25900/tcp # Optional if you want to expose the rcon port outside the container
+    environment:
+      CF_MODS: "adminui,spark" # Used to load mods from curseforge
+      HTY_OP_OWNER: 1 # Grants the owner UUID OP status
+      # RCON_PASSWORD: "secure_password"
+    volumes:
+      - ./data:/data
+      - ./main:/opt/hytale
 ```
 
 ### Volumes to Persist
