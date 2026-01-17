@@ -836,7 +836,7 @@ prepare_runtime() {
         "$(dirname "$HTY_ASSETS")" \
         "$(dirname "$HTY_AOT_CACHE")" \
         /opt/hytale/universe \
-        /opt/hytale/mods \
+        /mods \
         /opt/hytale/logs \
         /opt/hytale/cache
 }
@@ -1072,6 +1072,7 @@ build_command() {
     if [[ ${#extra_args_array[@]} -gt 0 ]]; then
         log "  Extra args: ${extra_args_array[*]}"
     fi
+
     if [[ -n ${HTY_IDENTITY_TOKEN// } ]]; then
         log "  Identity token provided"
     fi
@@ -1094,6 +1095,7 @@ build_command() {
         --assets "$HTY_ASSETS"
         --bind "$HTY_BIND"
         --auth-mode "$HTY_AUTH_MODE"
+        --mods "/mods"
     )
     local allow_op_normalized="${HTY_OP_SELF,,}"
     if [[ $allow_op_normalized == 1 || $allow_op_normalized == true || $allow_op_normalized == yes || $allow_op_normalized == on ]]; then
@@ -1212,19 +1214,19 @@ main() {
         RCON_PORT=$HTY_RCON_PORT
     fi
 
-    : "${RCON_ENABLED:=1}"
-    : "${RCON_BIND:=0.0.0.0:25900}"
+    : "${RCON_ENABLED:=0}"
+    : "${RCON_BIND:=0.0.0.0:5520}"
     : "${RCON_PASSWORD:=hytale}"
     : "${RCON_RESPONSE_TIMEOUT_MS:=2000}"
     : "${RCON_LOG_COMMANDS:=0}"
-    : "${RCON_BINARY:=/usr/local/bin/rcon-cli}"
+    : "${RCON_BINARY:=/usr/local/bin/hyrcon-client}"
     : "${RCON_CHILD_COMMAND:=}"
     : "${RCON_CHILD_DIR:=/data}"
     : "${RCON_CHILD_ARG:=}"
     : "${RCON_RESPAWN:=0}"
     : "${RCON_RESPAWN_BACKOFF_MS:=5000}"
     : "${RCON_HOST:=127.0.0.1}"
-    : "${RCON_PORT:=25900}"
+    : "${RCON_PORT:=5520}"
     : "${CF_MODS_HELPER:=/usr/local/bin/curseforge-mods}"
     : "${CF_MODS_DISABLE_UPDATES:=0}"
     OWNER_UUID=${OWNER_UUID:-}
@@ -1315,35 +1317,6 @@ main() {
 
     local cmd=()
     build_command cmd "$@"
-
-    local rcon_enable_normalized="${RCON_ENABLED,,}"
-    if [[ $rcon_enable_normalized == 1 || $rcon_enable_normalized == true || $rcon_enable_normalized == yes || $rcon_enable_normalized == on ]]; then
-        local child_command="${RCON_CHILD_COMMAND:-${cmd[0]}}"
-        if [[ -z ${child_command:-} ]]; then
-            die "Unable to determine server launch command for RCON proxy"
-        fi
-
-        local rcon_args=(
-            server
-            --bind "$RCON_BIND"
-            --password "$RCON_PASSWORD"
-            --response-timeout-ms "$RCON_RESPONSE_TIMEOUT_MS"
-            --child-command "$child_command"
-            --child-dir "$RCON_CHILD_DIR"
-        )
-        local rcon_log_commands_normalized="${RCON_LOG_COMMANDS,,}"
-        if [[ $rcon_log_commands_normalized == 1 || $rcon_log_commands_normalized == true || $rcon_log_commands_normalized == yes || $rcon_log_commands_normalized == on ]]; then
-            rcon_args+=(--log-commands)
-        fi
-        if [[ -n ${RCON_CHILD_ARG:-} ]]; then
-            rcon_args+=(--child-arg "$RCON_CHILD_ARG")
-        fi
-        for arg in "${cmd[@]:1}"; do
-            rcon_args+=(--child-arg "$arg")
-        done
-
-        exec "$RCON_BINARY" "${rcon_args[@]}"
-    fi
 
     exec "${cmd[@]}"
 }
