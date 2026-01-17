@@ -151,5 +151,3 @@ docker exec hytale hyrcon-client client --command "/op add dstn"
 ```sh
 hyrcon-client client --host 127.0.0.1 --port 5520 --interactive <-p password | or via RCON_PASSWORD env>
 ```
-
-Currently this will only show you the first line of the console after the command is executed, I'd like to improve this, but it'd be far better if Hytale had a built-in RCON server to execute commands similar to other games. But you can see the full output by viewing the logs/container output.
