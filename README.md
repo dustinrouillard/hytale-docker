@@ -42,7 +42,7 @@ According to token lifecycles in the [following article](https://support.hytale.
 | `CF_API_KEY` | _(empty)_ | CurseForge API key used for authenticated API and download requests. |
 | `CF_MODS_DISABLE_UPDATES` | `0` | Set to `1` to skip CurseForge synchronization during startup. |
 | `RCON_ENABLED` | `1` | Set to `1` to enable the RCON server. |
-| `RCON_BIND` | `0.0.0.0:5520` | Address/port the RCON server will bind to. |
+| `RCON_BIND` | `0.0.0.0:5522` | Address/port the RCON server will bind to. |
 | `RCON_PASSWORD` | `hytale` | Shared secret required by clients. |
 
 If `HTY_IDENTITY_TOKEN` / `HTY_SESSION_TOKEN` are not supplied, the entrypoint invokes our `hytale-oauth` utility to complete the device authentication flow automatically. Credentials are written to `/data/.auth.json`, and helper options accept the `HTY_AUTH_*` aliases (for example `HTY_AUTH_OWNER_UUID`, `HTY_AUTH_PROFILE`, `HTY_AUTH_HELPER`). After the initial bootstrap completes, the entrypoint schedules a background refresh loop that re-invokes the helper with `--force-refresh` on a default seven-day cadence (configurable via `HTY_AUTH_REFRESH_INTERVAL_SECONDS` or `HTY_AUTH_REFRESH_INTERVAL_DAYS`). Set `HTY_AUTH_REFRESH_INTERVAL_SECONDS=0` (or leave both interval variables empty) to disable the maintenance loop entirely. Set `HTY_SKIP_AUTH=1` to disable this bootstrap when you plan to manage tokens yourself.
@@ -101,7 +101,7 @@ services:
     restart: always
     ports:
       - 5520:5520/udp
-      - 5520:5520/tcp # Optional if you want to expose the rcon port outside the container
+      - 5522:5522/tcp # Optional if you want to expose the rcon port outside the container
     environment:
       CF_MODS: "adminui,spark" # Used to load mods from curseforge
       HTY_OP_OWNER: 1 # Grants the owner UUID OP status
@@ -129,7 +129,7 @@ Remember to publish the TCP port when you run the container if you need remote a
 docker run -d \
   --name hytale \
   -p 5520:5520/udp \
-  -p 5520:5520/tcp \
+  -p 5522:5522/tcp \
   -e RCON_PASSWORD="SecureRconPassword" \
   ghcr.io/dustinrouillard/hytale-docker
 ```
